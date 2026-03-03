@@ -1,33 +1,26 @@
-import { Op } from "./types";
-import { programToString } from "./ops";
+import { Op, Episode } from "./types";
 import { Slot } from "./types";
 import { Library } from "./library";
 import { executeSlot } from "./executor";
-
-// ─── Play config ──────────────────────────────────────────────────────────────
+import { programToString } from "./ops";
 
 export interface PlayConfig {
-  testsPerSlot?: number;   // how many inputs to test per slot (default 10)
-  domain?: number[];       // input domain to test over
-  rounds?: number;         // how many play rounds to run (default 1)
+  domain?: number[];
+  rounds?: number;
 }
-
-// ─── Hypothesis: what behavior do we *expect* from a slot? ────────────────────
-//
-// During play, we need to know what the "expected" output of a slot is for a
-// given input. We infer this from the slot's existing test history:
-//   - If the slot has been tested before, we use the majority vote as expected
-//   - If not, we run the slot on the domain and observe what it does
-//
-// A slot is "interesting" if it produces true for some inputs and false for
-// others — i.e., it's not trivially always-true or always-false.
 
 export interface SlotBehavior {
-  trueInputs: number[];    // inputs where slot returns true
-  falseInputs: number[];   // inputs where slot returns false
-  isInteresting: boolean;  // true if both sets are non-empty
-  pattern?: string;        // inferred label if pattern is clear
+  trueInputs: number[];
+  falseInputs: number[];
+  isInteresting: boolean;
+  pattern?: string;
 }
+
+// ─── PLAY: discovery — no right answers, just observation ─────────────────────
+//
+// The model runs each slot freely across the domain, notices what it does,
+// and names the pattern if it recognizes one. This is self-directed exploration.
+// Confidence is NOT updated here — that belongs to test mode.
 
 export function observeBehavior(
   ops: Op[],
@@ -48,47 +41,36 @@ export function observeBehavior(
   }
 
   const isInteresting = trueInputs.length > 0 && falseInputs.length > 0;
-
-  // Try to infer what concept this slot might represent
   const pattern = inferPattern(trueInputs, domain);
-
   return { trueInputs, falseInputs, isInteresting, pattern };
 }
 
-// ─── Pattern inference: can we name what this slot does? ──────────────────────
-//
-// Check if the set of true inputs matches a known pattern
-
 function inferPattern(trueInputs: number[], domain: number[]): string | undefined {
   if (trueInputs.length === 0) return "always_false";
+  if (trueInputs.length === domain.length) return "always_true";
 
-  const all = new Set(domain);
   const trueSet = new Set(trueInputs);
 
-  // Even numbers
   const evens = domain.filter(n => n % 2 === 0);
   if (setsEqual(trueSet, new Set(evens))) return "even";
 
-  // Odd numbers
   const odds = domain.filter(n => n % 2 !== 0);
   if (setsEqual(trueSet, new Set(odds))) return "odd";
 
-  // Single value
   if (trueInputs.length === 1) return `equals_${trueInputs[0]}`;
 
-  // Consecutive successor pattern: true for {n: n+1 is in domain}
-  // i.e. slot computes "has a successor in domain"
-  const hasSuccessor = domain.filter(n => domain.includes(n + 1));
-  if (setsEqual(trueSet, new Set(hasSuccessor))) return "has_successor";
-
-  // Predecessor pattern
-  const hasPredecessor = domain.filter(n => domain.includes(n - 1));
-  if (setsEqual(trueSet, new Set(hasPredecessor))) return "has_predecessor";
-
-  // Greater than threshold
   for (const thresh of domain) {
-    const gt = domain.filter(n => n > thresh);
-    if (setsEqual(trueSet, new Set(gt))) return `greater_than_${thresh}`;
+    if (setsEqual(trueSet, new Set(domain.filter(n => n > thresh)))) {
+      return `greater_than_${thresh}`;
+    }
+  }
+
+  if (setsEqual(trueSet, new Set(domain.filter(n => domain.includes(n + 1))))) {
+    return "has_successor";
+  }
+
+  if (setsEqual(trueSet, new Set(domain.filter(n => domain.includes(n - 1))))) {
+    return "has_predecessor";
   }
 
   return undefined;
@@ -100,10 +82,7 @@ function setsEqual(a: Set<number>, b: Set<number>): boolean {
   return true;
 }
 
-// ─── Play mode: test slots, update confidence, discover patterns ───────────────
-
 export interface PlayResult {
-  slotsTested: number;
   patternsDiscovered: string[];
   behaviors: Map<number, SlotBehavior>;
 }
@@ -115,104 +94,134 @@ export function play(
   verbose: boolean = false
 ): PlayResult {
   const domain = config.domain ?? [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-  const testsPerSlot = config.testsPerSlot ?? domain.length;
   const rounds = config.rounds ?? 1;
 
   const patternsDiscovered: string[] = [];
   const behaviors = new Map<number, SlotBehavior>();
 
   for (let round = 0; round < rounds; round++) {
-    if (verbose && rounds > 1) {
-      console.log(`  Play round ${round + 1}/${rounds}`);
-    }
+    if (verbose && rounds > 1) console.log(`  Play round ${round + 1}/${rounds}`);
 
-    // Prioritize least-confident slots
-    const slots = library.byConfidenceAsc();
-
-    if (slots.length === 0) {
-      if (verbose) console.log("  No slots to test.");
-      break;
-    }
-
-    for (const slot of slots) {
-      // Observe what this slot actually does across the domain
+    for (const slot of library.all()) {
       const behavior = observeBehavior(ops, slot, domain);
       behaviors.set(slot.id, behavior);
 
       if (verbose) {
+        const type = slot.isParametrized ? " ◆" : "";
         const prog = programToString(ops, slot.program);
-        console.log(`\n  Testing slot#${slot.id}: ${prog}`);
+        console.log(`\n  Exploring slot#${slot.id}${type}: ${prog}`);
         console.log(`    true on:  [${behavior.trueInputs.join(", ")}]`);
         console.log(`    false on: [${behavior.falseInputs.join(", ")}]`);
-        console.log(`    interesting: ${behavior.isInteresting}`);
-        if (behavior.pattern) {
-          console.log(`    pattern: ${behavior.pattern}`);
-        }
+        if (behavior.pattern) console.log(`    pattern:  ${behavior.pattern}`);
       }
 
-      if (!behavior.isInteresting) {
-        // Trivial slot: always true or always false — low confidence
-        for (let i = 0; i < testsPerSlot; i++) {
-          library.updateConfidence(slot.id, false);
-        }
-        if (verbose) console.log(`    → trivial, penalizing confidence`);
-        continue;
-      }
-
-      // Test the slot: run on random inputs and check for consistency
-      // A "consistent" slot should produce the same pattern every time it runs
-      // (our ops are deterministic, so this is really checking for instability
-      // introduced by any future stochastic elements)
-      let correct = 0;
-      const testInputs = selectTestInputs(domain, testsPerSlot);
-
-      for (const input of testInputs) {
-        try {
-          const { result } = executeSlot(ops, slot.program, input);
-          // "Correct" means consistent with observed behavior
-          const expected = behavior.trueInputs.includes(input);
-          if (result === expected) correct++;
-          library.updateConfidence(slot.id, result === expected);
-        } catch {
-          library.updateConfidence(slot.id, false);
-        }
-      }
-
-      // If a pattern was inferred, label the slot
       if (behavior.pattern && !slot.label) {
         library.setLabel(slot.id, behavior.pattern);
         if (!patternsDiscovered.includes(behavior.pattern)) {
           patternsDiscovered.push(behavior.pattern);
-          if (verbose) {
-            console.log(`    ✓ DISCOVERED pattern: "${behavior.pattern}"`);
-          }
+          if (verbose) console.log(`    ✓ DISCOVERED: "${behavior.pattern}"`);
         }
       }
     }
   }
 
-  return {
-    slotsTested: library.all().length,
-    patternsDiscovered,
-    behaviors
-  };
+  return { patternsDiscovered, behaviors };
 }
 
-// ─── Select test inputs with some coverage strategy ───────────────────────────
-// Ensure we test both boundary and middle values
+// ─── TEST: evaluation — apply learned concepts to known episodes ───────────────
+//
+// Each episode supplies its own initialVal. The model runs every slot on that
+// context and checks if the answer is correct. Confidence is updated here.
+// Over time, slots that consistently predict correctly gain high confidence.
 
-function selectTestInputs(domain: number[], n: number): number[] {
-  if (n >= domain.length) return [...domain];
+export interface TestResult {
+  accuracyBySlot: Map<number, number>;
+  accuracyByRelation: Record<string, number>;
+}
 
-  // Always include first, last, and random middle
-  const result = new Set<number>();
-  result.add(domain[0]);
-  result.add(domain[domain.length - 1]);
-
-  while (result.size < n) {
-    const idx = Math.floor(Math.random() * domain.length);
-    result.add(domain[idx]);
+export function test(
+  ops: Op[],
+  library: Library,
+  episodes: Episode[],
+  verbose: boolean = false
+): TestResult {
+  if (episodes.length === 0) {
+    return { accuracyBySlot: new Map(), accuracyByRelation: {} };
   }
 
-  return Array.from(result);
+  const slotCorrect = new Map<number, number>();
+  const slotTotal   = new Map<number, number>();
+  // slotRelCorrect: slotId → relation → correct count
+  const slotRelCorrect = new Map<number, Map<string, number>>();
+  const slotRelTotal   = new Map<number, Map<string, number>>();
+
+  for (const slot of library.all()) {
+    for (const ep of episodes) {
+      let result = false;
+      try {
+        result = executeSlot(ops, slot.program, ep.initialVal).result;
+      } catch { /* false */ }
+
+      const hit = result === ep.expected;
+      library.updateConfidence(slot.id, hit);
+
+      slotCorrect.set(slot.id, (slotCorrect.get(slot.id) ?? 0) + (hit ? 1 : 0));
+      slotTotal.set(slot.id,   (slotTotal.get(slot.id)   ?? 0) + 1);
+
+      if (!slotRelCorrect.has(slot.id)) slotRelCorrect.set(slot.id, new Map());
+      if (!slotRelTotal.has(slot.id))   slotRelTotal.set(slot.id, new Map());
+      const rc = slotRelCorrect.get(slot.id)!;
+      const rt = slotRelTotal.get(slot.id)!;
+      rc.set(ep.relation, (rc.get(ep.relation) ?? 0) + (hit ? 1 : 0));
+      rt.set(ep.relation, (rt.get(ep.relation) ?? 0) + 1);
+    }
+  }
+
+  const accuracyBySlot = new Map<number, number>();
+  for (const [id, total] of slotTotal) {
+    accuracyBySlot.set(id, (slotCorrect.get(id) ?? 0) / total);
+  }
+
+  // Derive per-relation accuracy from per-slot-relation data
+  const relCorrectAgg = new Map<string, number>();
+  const relTotalAgg   = new Map<string, number>();
+  for (const ep of episodes) {
+    relTotalAgg.set(ep.relation, (relTotalAgg.get(ep.relation) ?? 0) + library.all().length);
+  }
+  for (const [, rc] of slotRelCorrect) {
+    for (const [rel, c] of rc) {
+      relCorrectAgg.set(rel, (relCorrectAgg.get(rel) ?? 0) + c);
+    }
+  }
+  const accuracyByRelation: Record<string, number> = {};
+  for (const [rel, total] of relTotalAgg) {
+    accuracyByRelation[rel] = (relCorrectAgg.get(rel) ?? 0) / total;
+  }
+
+  if (verbose) {
+    // What was tested
+    const relCounts = new Map<string, number>();
+    for (const ep of episodes) relCounts.set(ep.relation, (relCounts.get(ep.relation) ?? 0) + 1);
+    console.log(`\n  Tested ${episodes.length} episodes:`);
+    for (const [rel, n] of relCounts) console.log(`    ${rel}: ${n} episodes`);
+
+    // Per-slot scores broken down by relation
+    console.log("\n  Score by slot:");
+    for (const slot of library.all()) {
+      const label = slot.label ? ` [${slot.label}]` : "";
+      const prog = programToString(ops, slot.program);
+      const rc = slotRelCorrect.get(slot.id)!;
+      const rt = slotRelTotal.get(slot.id)!;
+      const breakdown = Array.from(rt.keys())
+        .map(rel => {
+          const c = rc.get(rel) ?? 0;
+          const t = rt.get(rel) ?? 0;
+          return `${rel}: ${c}/${t}`;
+        })
+        .join("  ");
+      console.log(`    slot#${slot.id}${label}: ${breakdown} — ${prog}`);
+    }
+  }
+
+  return { accuracyBySlot, accuracyByRelation };
 }

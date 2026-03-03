@@ -1,18 +1,18 @@
 // ─── Core State ───────────────────────────────────────────────────────────────
 
 export interface State {
-  val: number;     // current numeric value being reasoned about
-  boolean: boolean; // current hypothesis evaluation
+  val: number;
+  boolean: boolean;
 }
 
 // ─── Ops ──────────────────────────────────────────────────────────────────────
 
 export type OpKind =
-  | { kind: "reset"; n: number }       // val = n
-  | { kind: "add"; k: number }         // val += k
-  | { kind: "compare_eq" }             // boolean = (val === 0)
-  | { kind: "compare_gt" }             // boolean = (val > 0)
-  | { kind: "compare_lt" };            // boolean = (val < 0)
+  | { kind: "reset"; n: number }
+  | { kind: "add"; k: number }
+  | { kind: "compare_eq" }
+  | { kind: "compare_gt" }
+  | { kind: "compare_lt" };
 
 export interface Op {
   id: number;
@@ -20,38 +20,72 @@ export interface Op {
   spec: OpKind;
 }
 
-
 // ─── Program ──────────────────────────────────────────────────────────────────
 
-// A program is just a sequence of op ids
-export type Program = number[];
+// A step is either a single op or a parametrized repeat.
+// k="free" means: at inference time try k=0,1,2,... until the
+// terminal compare op returns true, or maxK exhausted → false.
+export type ProgramStep =
+  | { kind: "op"; id: number }
+  | { kind: "repeat"; opId: number; k: number | "free" };
 
-// A trace is a program paired with the states it produced
+export type Program = ProgramStep[];
+
+// FlatProgram: raw op-id sequence produced by search before generalization
+export type FlatProgram = number[];
+
+export function liftProgram(flat: FlatProgram): Program {
+  return flat.map(id => ({ kind: "op" as const, id }));
+}
+
+export function flattenProgram(program: Program): FlatProgram {
+  const out: FlatProgram = [];
+  for (const step of program) {
+    if (step.kind === "op") {
+      out.push(step.id);
+    } else if (step.kind === "repeat" && typeof step.k === "number") {
+      for (let i = 0; i < step.k; i++) out.push(step.opId);
+    }
+  }
+  return out;
+}
+
+export function isParametrized(program: Program): boolean {
+  return program.some(s => s.kind === "repeat" && s.k === "free");
+}
+
+// ─── Trace ────────────────────────────────────────────────────────────────────
+
 export interface Trace {
-  program: Program;
-  states: State[];   // one per step, including initial
+  program: FlatProgram;   // always flat; traces come from ground execution
+  states: State[];
   finalState: State;
 }
 
-// ─── Slot Library ─────────────────────────────────────────────────────────────
+// ─── Slot ─────────────────────────────────────────────────────────────────────
 
 export interface Slot {
   id: number;
-  program: Program;        // sequence of op ids
-  confidence: number;      // 0..1, updated during play
-  testCount: number;       // how many play-mode tests run
-  falsificationCount: number; // how many times output was unexpected
+  program: Program;
+  isParametrized: boolean;
+  groundIds?: number[];     // ground slot ids this subsumes (if parametrized)
+  confidence: number;
+  testCount: number;
+  falsificationCount: number;
   version: number;
-  label?: string;          // optional human-readable name, discovered during play
+  label?: string;
 }
 
-// ─── Relations (for wake mode) ────────────────────────────────────────────────
+// ─── Relations ────────────────────────────────────────────────────────────────
 
 export type RelationKind = "successor" | "predecessor" | "parity";
 
 export interface Episode {
   relation: RelationKind;
-  a: number;               // primary input
-  b?: number;              // secondary input (for binary relations)
-  expected: boolean;       // ground truth
+  a: number;
+  b?: number;
+  expected: boolean;
+  // Initial val fed to the program. Unary: a. Binary: a - b (encodes the gap).
+  // Programs are then evaluated uniformly — no binary/unary distinction at runtime.
+  initialVal: number;
 }

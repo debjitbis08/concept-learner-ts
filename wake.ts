@@ -1,8 +1,8 @@
 import { Op } from "./types";
-import { programToString } from "./ops";
+import { flatProgramToString } from "./ops";
 import { Episode, Trace, RelationKind } from "./types";
 import { searchProgram } from "./search";
-import { execute } from "./executor";
+import { executeFlatProgram } from "./executor";
 
 // ─── Generate episodes for a relation ─────────────────────────────────────────
 
@@ -15,26 +15,28 @@ export function generateEpisodes(
   switch (relation) {
     case "successor":
       // is b the successor of a? i.e. b === a + 1
+      // initialVal = a - b: program add(+1) → compare_eq checks (a-b)+1 == 0
       for (const a of domain) {
         for (const b of domain) {
-          episodes.push({ relation, a, b, expected: b === a + 1 });
+          episodes.push({ relation, a, b, expected: b === a + 1, initialVal: a - b });
         }
       }
       break;
 
     case "predecessor":
       // is b the predecessor of a? i.e. b === a - 1
+      // initialVal = a - b: for true episodes gap=1; program add(-1) → compare_eq checks gap-1==0
       for (const a of domain) {
         for (const b of domain) {
-          episodes.push({ relation, a, b, expected: b === a - 1 });
+          episodes.push({ relation, a, b, expected: b === a - 1, initialVal: a - b });
         }
       }
       break;
 
     case "parity":
-      // is a even?
+      // is a even? initialVal = a (unary — program resets to a then subtracts down)
       for (const a of domain) {
-        episodes.push({ relation, a, expected: a % 2 === 0 });
+        episodes.push({ relation, a, expected: a % 2 === 0, initialVal: a });
       }
       break;
   }
@@ -118,7 +120,7 @@ function buildImitationTrace(ops: Op[], ep: Episode): Trace | null {
 
       const initial = { val: ep.a, boolean: false };
       try {
-        const trace = execute(ops, program, initial);
+        const trace = executeFlatProgram(ops, program, initial);
         // Verify it's correct
         if (trace.finalState.boolean === ep.expected) return trace;
       } catch { /* skip */ }
@@ -161,7 +163,7 @@ export function wake(
       traces.push(trace);
       solved++;
       if (verbose) {
-        const prog = programToString(ops, trace.program);
+        const prog = flatProgramToString(ops, trace.program);
         console.log(`  ✓ ${ep.relation}(${ep.a}${ep.b !== undefined ? `,${ep.b}` : ""})=${ep.expected}: ${prog}`);
       }
     } else {

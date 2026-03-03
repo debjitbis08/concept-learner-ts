@@ -1,5 +1,5 @@
-import { Op, State, Trace, Episode, Program } from "./types";
-import { execute } from "./executor";
+import { Op, State, Trace, Episode, FlatProgram } from "./types";
+import { executeFlatProgram } from "./executor";
 
 // ─── Enumerate all programs up to maxLength ────────────────────────────────────
 //
@@ -18,16 +18,6 @@ export function searchProgram(
   episode: Episode,
   maxLength: number = 4
 ): Trace | null {
-  // Find reset op for input a
-  const resetA = ops.find(o => o.spec.kind === "reset" && o.spec.n === episode.a);
-  if (!resetA) return null;
-
-  // Find reset op for input b if needed
-  const resetB = episode.b !== undefined
-    ? ops.find(o => o.spec.kind === "reset" && o.spec.n === episode.b)
-    : undefined;
-
-  // Find add and compare ops
   const addOps = ops.filter(o => o.spec.kind === "add");
   const compareOps = ops.filter(o =>
     o.spec.kind === "compare_eq" ||
@@ -35,34 +25,44 @@ export function searchProgram(
     o.spec.kind === "compare_lt"
   );
 
-  // Build candidate op pool: adds + compares (resets handled specially)
-  const middleOps = [...addOps];
+  if (episode.b !== undefined) {
+    // Binary relation: encode the difference (a - b) in the initial state.
+    // Search for programs of the form: add+ → compare
+    // Require at least one add so the program actually computes something.
+    // For expected=true, restrict to compare_eq to avoid spurious matches
+    // (e.g. add(-2) → compare_lt accidentally matching before add(+1) → compare_eq).
+    const usedCompares = episode.expected
+      ? compareOps.filter(o => o.spec.kind === "compare_eq")
+      : compareOps;
+    const initialState: State = { val: episode.a - episode.b, boolean: false };
 
-  // BFS over programs: always start with reset(a), end with compare
-  // Middle ops are adds only
+    for (let addLen = 1; addLen <= maxLength - 1; addLen++) {
+      const combos = cartesian(addOps.map(o => o.id), addLen);
+      for (const adds of combos) {
+        for (const cmp of usedCompares) {
+          const flatProgram = [...adds, cmp.id];
+          try {
+            const trace = executeFlatProgram(ops, flatProgram, initialState);
+            if (trace.finalState.boolean === episode.expected) {
+              return trace;
+            }
+          } catch { /* skip */ }
+        }
+      }
+    }
+    return null;
+  }
+
+  // Unary relation: start with reset(a), end with compare, adds in middle
+  const resetA = ops.find(o => o.spec.kind === "reset" && o.spec.n === episode.a);
+  if (!resetA) return null;
   const initialState: State = { val: episode.a, boolean: false };
 
-  // Try programs of increasing length
   for (let len = 2; len <= maxLength; len++) {
-    // Program structure: [reset(a), ...middle(len-2)..., compare]
     const middleLen = len - 2;
-
     if (middleLen < 0) continue;
-
-    // Enumerate all combinations of middle ops
-    const solutions = enumerateMiddle(
-      ops,
-      resetA,
-      middleOps,
-      compareOps,
-      middleLen,
-      initialState,
-      episode.expected
-    );
-
-    if (solutions.length > 0) {
-      return solutions[0]; // return shortest solution
-    }
+    const solutions = enumerateMiddle(ops, resetA, addOps, compareOps, middleLen, initialState, episode.expected);
+    if (solutions.length > 0) return solutions[0];
   }
 
   return null;
@@ -84,10 +84,10 @@ function enumerateMiddle(
 
   for (const middle of combos) {
     for (const cmp of compareOps) {
-      const program: Program = [resetOp.id, ...middle, cmp.id];
+      const flatProgram = [resetOp.id, ...middle, cmp.id];
 
       try {
-        const trace = execute(ops, program, initialState);
+        const trace = executeFlatProgram(ops, flatProgram, initialState);
         if (trace.finalState.boolean === expected) {
           solutions.push(trace);
         }

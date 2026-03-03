@@ -1,4 +1,4 @@
-import { Slot, Program, Op } from "./types";
+import { Slot, Program, Op, isParametrized } from "./types";
 import { programToString } from "./ops";
 
 // ─── Library ──────────────────────────────────────────────────────────────────
@@ -8,10 +8,10 @@ export class Library {
   private nextId: number = 0;
 
   // Install a new slot, returns its id
-  install(program: Program, label?: string): number {
+  install(program: Program, label?: string, groundIds?: number[]): number {
     // Check for duplicates
     for (const [, slot] of this.slots) {
-      if (arraysEqual(slot.program, program)) {
+      if (programsEqual(slot.program, program)) {
         return slot.id; // already exists
       }
     }
@@ -20,6 +20,8 @@ export class Library {
     this.slots.set(id, {
       id,
       program,
+      isParametrized: isParametrized(program),
+      groundIds,
       confidence: 0.5, // start uncertain
       testCount: 0,
       falsificationCount: 0,
@@ -31,6 +33,10 @@ export class Library {
 
   get(id: number): Slot | undefined {
     return this.slots.get(id);
+  }
+
+  remove(id: number): void {
+    this.slots.delete(id);
   }
 
   all(): Slot[] {
@@ -92,6 +98,6 @@ export class Library {
   }
 }
 
-function arraysEqual(a: number[], b: number[]): boolean {
-  return a.length === b.length && a.every((v, i) => v === b[i]);
+function programsEqual(a: Program, b: Program): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
 }
